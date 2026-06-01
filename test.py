@@ -9,8 +9,34 @@ import numpy as np
 LAT_LON_MAP = None
 
 
+def _parse_kma_latlon_text(text, value_col):
+    """
+    기상청 1.6 API 텍스트 응답 파싱.
+    형식: 첫 줄 "  nx,  ny,=" → 이후 줄들은 쉼표 구분 float 값 (인덱스 없음)
+    """
+    first_nl = text.index('\n')
+    header_parts = text[:first_nl].replace('=', '').split(',')
+    nx = int(header_parts[0].strip())
+    ny = int(header_parts[1].strip())
+
+    data_io = io.StringIO(text[first_nl + 1:])
+    arr = pd.read_csv(data_io, header=None, dtype=np.float64).values.flatten()
+    vals = arr[~np.isnan(arr)]
+
+    if len(vals) != nx * ny:
+        raise ValueError(f"예상 값 수 {nx * ny}개, 실제 {len(vals)}개")
+
+    vals = vals.reshape(ny, nx)
+    ny_idx, nx_idx = np.meshgrid(np.arange(ny), np.arange(nx), indexing='ij')
+    return pd.DataFrame({
+        'ny': ny_idx.flatten().astype(np.int64),
+        'nx': nx_idx.flatten().astype(np.int64),
+        value_col: vals.flatten(),
+    })
+
+
 def get_latlon_map(auth_key):
-    """기상청 1.6 API를 텍스트 형태로 읽어와 nx, ny 격자에 대응하는 위경도 판을 생성합니다."""
+    """기상청 1.6 API로 nx, ny 격자에 대응하는 위경도 판을 생성합니다."""
     global LAT_LON_MAP
     if LAT_LON_MAP is not None:
         return LAT_LON_MAP
@@ -21,37 +47,19 @@ def get_latlon_map(auth_key):
     lon_url = f"https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-sfc_obs_latlon_api?latlon=lon&authKey={auth_key}"
 
     try:
-        # 1. 위도 데이터 가져오기 및 파싱
-        lat_res = requests.get(lat_url)
-        if "인증 오류" in lat_res.text or "error" in lat_res.text.lower():
-            print("❌ 기상청 서버 메시지:", lat_res.text[:200])
+        lat_res = requests.get(lat_url, timeout=60)
+        lon_res = requests.get(lon_url, timeout=60)
+
+        if lat_res.status_code != 200:
+            print(f"❌ 위도 API HTTP 오류: {lat_res.status_code}")
+            return None
+        if "인증 오류" in lat_res.text[:300]:
+            print("❌ 인증 오류:", lat_res.text[:200])
             return None
 
-        # low_memory=False 추가 및 일단 문자열로 안전하게 읽기
-        df_lat = pd.read_csv(io.StringIO(lat_res.text), sep=r'\s+', comment='#', header=None, names=['ny', 'nx', 'lat'],
-                             low_memory=False)
+        df_lat = _parse_kma_latlon_text(lat_res.text, 'lat')
+        df_lon = _parse_kma_latlon_text(lon_res.text, 'lon')
 
-        # 2. 경도 데이터 가져오기 및 파싱
-        lon_res = requests.get(lon_url)
-        df_lon = pd.read_csv(io.StringIO(lon_res.text), sep=r'\s+', comment='#', header=None, names=['ny', 'nx', 'lon'],
-                             low_memory=False)
-
-        # [오류 해결 핵심] 숫자가 아닌 잘못된 행(헤더 텍스트 등) 제거 및 데이터 타입 숫자형(int/float)으로 강제 변환
-        for df in [df_lat, df_lon]:
-            df['ny'] = pd.to_numeric(df['ny'], errors='coerce')
-            df['nx'] = pd.to_numeric(df['nx'], errors='coerce')
-
-        # 결측치(문자열이라 변환 실패한 행) 제거 후 int 타입으로 통일
-        df_lat = df_lat.dropna(subset=['ny', 'nx']).astype({'ny': 'int64', 'nx': 'int64'})
-        df_lon = df_lon.dropna(subset=['ny', 'nx']).astype({'ny': 'int64', 'nx': 'int64'})
-
-        # 위도/경도 값도 숫자로 변환
-        df_lat['lat'] = pd.to_numeric(df_lat['lat'], errors='coerce')
-        df_lon['lon'] = pd.to_numeric(df_lon['lon'], errors='coerce')
-        df_lat = df_lat.dropna(subset=['lat'])
-        df_lon = df_lon.dropna(subset=['lon'])
-
-        # 3. ny, nx (격자좌표) 기준으로 병합
         LAT_LON_MAP = pd.merge(df_lat, df_lon, on=['ny', 'nx'])
         print(f"🌐 위경도 매핑 판 구축 완료! (총 {len(LAT_LON_MAP)}개 격자 매핑됨)\n")
 
@@ -85,16 +93,21 @@ def download_and_extract_haenam(tm_str, obs_element, auth_key, output_csv_path):
 
     try:
         # 2. xarray로 알맹이 NetCDF 파일 열기
-        ds = xr.open_dataset(temp_nc_file)
-        data_var = list(ds.data_vars)[0]
+        with xr.open_dataset(temp_nc_file) as ds:
+            data_var = list(ds.data_vars)[0]
 
-        # 3. 데이터프레임 변환 후 컬럼명 소문자 규격화
-        df = ds[data_var].to_dataframe().reset_index()
+            # 3. 데이터프레임 변환 후 컬럼명 소문자 규격화
+            df = ds[data_var].to_dataframe().reset_index()
+
         df.columns = [c.lower() for c in df.columns]
         df = df.rename(columns={data_var.lower(): 'value'})
 
         # [오류 해결 핵심] 다운로드한 날씨 파일의 데이터 타입도 int64로 확실하게 일치시킴
         df = df.astype({'ny': 'int64', 'nx': 'int64'})
+
+        # 진단: ny/nx 범위 확인 (grid_map과 인덱스 범위가 맞지 않으면 병합 결과가 0이 됨)
+        print(f"[DEBUG] NetCDF ny: {df['ny'].min()}~{df['ny'].max()}, nx: {df['nx'].min()}~{df['nx'].max()}")
+        print(f"[DEBUG] grid_map ny: {grid_map['ny'].min()}~{grid_map['ny'].max()}, nx: {grid_map['nx'].min()}~{grid_map['nx'].max()}")
 
         # 4. 다운로드한 데이터에 위경도 매핑 지도 융합
         df = pd.merge(df, grid_map, on=['ny', 'nx'], how='inner')
@@ -118,16 +131,19 @@ def download_and_extract_haenam(tm_str, obs_element, auth_key, output_csv_path):
 
         final_df = haenam_df[['time_kst', 'element', 'lat', 'lon', 'value']]
 
-        # 7. CSV 파일로 저장
-        if not os.path.exists(output_csv_path):
-            final_df.to_csv(output_csv_path, index=False, mode='w', encoding='utf-8-sig')
-        else:
-            final_df.to_csv(output_csv_path, index=False, mode='a', header=False, encoding='utf-8-sig')
+        # 7. CSV 파일로 저장 (output_csv_path가 None이면 저장 없이 반환만)
+        if output_csv_path is not None:
+            if not os.path.exists(output_csv_path):
+                final_df.to_csv(output_csv_path, index=False, mode='w', encoding='utf-8-sig')
+            else:
+                final_df.to_csv(output_csv_path, index=False, mode='a', header=False, encoding='utf-8-sig')
+            print(f"[{tm_str} | {obs_element}] 해남군 격자 {len(final_df)}개 추출 및 CSV 저장 성공!")
 
-        print(f"[{tm_str} | {obs_element}] 해남군 격자 {len(final_df)}개 추출 및 CSV 저장 성공!")
+        return final_df
 
     except Exception as e:
         print(f"❌ 처리 중 오류 발생: {e}")
+        return None
 
     finally:
         if os.path.exists(temp_nc_file):
@@ -139,18 +155,51 @@ def download_and_extract_haenam(tm_str, obs_element, auth_key, output_csv_path):
 # ==========================================
 if __name__ == "__main__":
 
-    AUTH_KEY = "5uVnBqgbS8KlZwaoG8vC8w"  # 본인의 기상청 인증키 입력
+    AUTH_KEY = "5uVnBqgbS8KlZwaoG8vC8w"
     OUTPUT_FILE = "haenam_weather_data.csv"
 
-    # 테스트용 시간 범위
-    dates = pd.date_range(start="2010-01-01 00:00", end="2010-01-01 02:00", freq="h")
-    target_times = [date.strftime("%Y%m%d%H%M") for date in dates]
+    # 누적/일값 요소: 하루 중 1회(00시)만 다운로드
+    DAILY_ELEMENTS = {'rn_day', 'sd_tot', 'sd_day', 'sd_24h'}
 
-    # 기온(ta)과 일강수(rn_day) 지정
-    elements = ['ta', 'rn_day']
+    # 시간형 요소: 00, 06, 12, 18시 4회 다운로드 후 일평균 산출
+    HOURLY_ELEMENTS = ['ta', 'hm', 'td', 'ws_10m', 'pa', 'ps', 'vs', 'ta_chi']
 
-    for tm in target_times:
-        for obs in elements:
+    dates = pd.date_range(start="2010-01-01", end="2010-01-03", freq="D")
+
+    for date in dates:
+        date_str = date.strftime("%Y%m%d")
+
+        # 누적형: 00시 1회
+        for obs in DAILY_ELEMENTS:
+            tm = date.strftime("%Y%m%d0000")
             download_and_extract_haenam(tm, obs, AUTH_KEY, OUTPUT_FILE)
 
-    print("\n🎉 모든 지정된 데이터 처리가 완료되었습니다!")
+        # 시간형: 4회 다운로드 후 일평균
+        for obs in HOURLY_ELEMENTS:
+            frames = []
+            for hour in ["0000", "0600", "1200", "1800"]:
+                tm = date.strftime("%Y%m%d") + hour
+                df = download_and_extract_haenam(tm, obs, AUTH_KEY, output_csv_path=None)
+                if df is not None:
+                    frames.append(df)
+
+            if not frames:
+                continue
+
+            daily_mean = (
+                pd.concat(frames)
+                .groupby(['lat', 'lon'], as_index=False)['value']
+                .mean()
+            )
+            daily_mean['time_kst'] = date_str
+            daily_mean['element'] = obs
+            final = daily_mean[['time_kst', 'element', 'lat', 'lon', 'value']]
+
+            if not os.path.exists(OUTPUT_FILE):
+                final.to_csv(OUTPUT_FILE, index=False, mode='w', encoding='utf-8-sig')
+            else:
+                final.to_csv(OUTPUT_FILE, index=False, mode='a', header=False, encoding='utf-8-sig')
+
+            print(f"[{date_str} | {obs}] 일평균 저장 완료 ({len(final)}개 격자)")
+
+    print("\n모든 지정된 데이터 처리가 완료되었습니다!")
