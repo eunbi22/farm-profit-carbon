@@ -4,8 +4,11 @@ KAMIS API 16번: 신)일별 품목별 도매 가격자료
 """
 
 import json
+import os
 import requests
 from datetime import datetime, timedelta
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 API_KEY = "b55b4819-6b83-446b-92a9-46da1ac84082"
 CERT_ID = "8175"
@@ -42,7 +45,9 @@ if __name__ == "__main__":
     data = resp.json()
 
     out_path = "rice_wholesale.json"
-    with open("../data/"+out_path, "w", encoding="utf-8") as f:
+    out_dir = os.path.join(ROOT, "data")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, out_path), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    print(f"저장 완료: {out_path}")
+    print(f"저장 완료: {os.path.join(out_dir, out_path)}")
