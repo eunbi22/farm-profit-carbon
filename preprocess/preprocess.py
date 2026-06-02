@@ -43,9 +43,8 @@ for col in ['temp_avg','temp_min','temp_max']:
 # 기상 merge
 df_weather = pd.merge(df_rn, df_ta, on='date', how='inner')
 
-# 생산량 (2019년 앵커 추가해서 보간 시작점 확보)
+# 생산량: 연도별 확정값을 해당 연도 전체 날짜에 매핑
 production = {
-    2019: 80196,  # 2020과 동일값으로 앵커
     2020: 80196,
     2021: 110029,
     2022: 96105,
@@ -53,19 +52,15 @@ production = {
     2024: 94778,
     2025: 93393,
 }
-prod_points = pd.DataFrame([
-    {'date': pd.Timestamp(f'{year}-12-31'), 'production_ton': val}
-    for year, val in production.items()
-])
+last_prod_year = max(production.keys())
 
-date_range = pd.date_range(df_weather['date'].min(), df_weather['date'].max(), freq='D')
-df_prod = pd.DataFrame({'date': date_range})
-df_prod = pd.merge(df_prod, prod_points, on='date', how='left')
-df_prod['production_ton'] = df_prod['production_ton'].interpolate(method='linear').bfill()
+df_weather['year'] = df_weather['date'].dt.year
+df_weather = df_weather[df_weather['year'] <= last_prod_year].drop(columns='year')
+
+df_weather['production_ton'] = df_weather['date'].dt.year.map(production)
 
 # 최종 merge
-df_final = pd.merge(df_weather, df_prod, on='date', how='left')
-df_final = df_final.dropna(subset=['temp_avg'])
+df_final = df_weather.dropna(subset=['temp_avg', 'production_ton'])
 
 print(f"최종 데이터: {df_final.shape}")
 print(f"NaN 개수: {df_final.isna().sum().to_dict()}")
