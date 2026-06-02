@@ -6,7 +6,7 @@ import xarray as xr
 import pandas as pd
 import numpy as np
 
-AUTH_KEY = "5uVnBqgbS8KlZwaoG8vC8w"
+AUTH_KEY = "vpPy8-qxSKCT8vPqsaigPg"
 OUTPUT_FILE = "haenam_weather_historical.csv"
 
 LAT_MIN, LAT_MAX = 34.28, 34.67
@@ -52,8 +52,8 @@ def get_latlon_map(auth_key):
 
     for attempt in range(1, 4):
         try:
-            lat_res = requests.get(lat_url, timeout=90)
-            lon_res = requests.get(lon_url, timeout=90)
+            lat_res = requests.get(lat_url, timeout=3000)
+            lon_res = requests.get(lon_url, timeout=3000)
             break
         except KeyboardInterrupt:
             raise
@@ -84,7 +84,7 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
 
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, timeout=60)
+            resp = requests.get(url, verify=False, timeout=3000)
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code} [{tm_str}|{obs_element}] (시도 {attempt}/{retries})")
                 time.sleep(2 * attempt)
@@ -94,6 +94,7 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
                 f.write(resp.content)
 
             with xr.open_dataset(temp_nc) as ds:
+                ds.load()  # Windows: 파일 핸들 즉시 해제를 위해 메모리에 강제 로드
                 data_var = list(ds.data_vars)[0]
                 df = ds[data_var].to_dataframe().reset_index()
 
