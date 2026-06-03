@@ -2,17 +2,19 @@ import os
 import io
 import time
 import requests
+import urllib3
 import xarray as xr
 import pandas as pd
 import numpy as np
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 AUTH_KEY = "vpPy8-qxSKCT8vPqsaigPg"
-OUTPUT_FILE = "haenam_weather_historical.csv"
+OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "haenam_weather_grid.csv")
 
 LAT_MIN, LAT_MAX = 34.28, 34.67
 LON_MIN, LON_MAX = 126.24, 126.75
 
-# 4시간 간격 6지점 (00, 04, 08, 12, 16, 20시)
 TA_HOURS = ["0000", "0400", "0800", "1200", "1600", "2000"]
 
 LAT_LON_MAP = None
@@ -52,8 +54,8 @@ def get_latlon_map(auth_key):
 
     for attempt in range(1, 4):
         try:
-            lat_res = requests.get(lat_url, timeout=3000)
-            lon_res = requests.get(lon_url, timeout=3000)
+            lat_res = requests.get(lat_url, verify=False, timeout=90)
+            lon_res = requests.get(lon_url, verify=False, timeout=90)
             break
         except KeyboardInterrupt:
             raise
@@ -74,8 +76,10 @@ def get_latlon_map(auth_key):
     return LAT_LON_MAP
 
 
-def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
-    """특정 시각의 요소 데이터를 받아 해남군 격자 평균값 반환. 실패 시 None."""
+def fetch_haenam_grid_data(tm_str, obs_element, auth_key, retries=3):
+    """특정 시각의 요소 데이터를 받아 해남군 격자별 DataFrame 반환. 실패 시 None.
+    반환 컬럼: ny, nx, lat, lon, value
+    """
     url = (
         f"https://apihub.kma.go.kr/api/typ01/url/sfc_grid_nc_down.php"
         f"?obs={obs_element}&tm={tm_str}&authKey={auth_key}"
@@ -84,7 +88,7 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
 
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, verify=False, timeout=3000)
+            resp = requests.get(url, verify=False, timeout=60)
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code} [{tm_str}|{obs_element}] (시도 {attempt}/{retries})")
                 time.sleep(2 * attempt)
@@ -94,7 +98,7 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
                 f.write(resp.content)
 
             with xr.open_dataset(temp_nc) as ds:
-                ds.load()  # Windows: 파일 핸들 즉시 해제를 위해 메모리에 강제 로드
+                ds.load()
                 data_var = list(ds.data_vars)[0]
                 df = ds[data_var].to_dataframe().reset_index()
 
@@ -108,19 +112,19 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
             haenam = df[
                 (df['lat'] >= LAT_MIN) & (df['lat'] <= LAT_MAX) &
                 (df['lon'] >= LON_MIN) & (df['lon'] <= LON_MAX)
-            ]
+            ].copy()
 
             if haenam.empty:
                 print(f"  해남 격자 없음 [{tm_str}|{obs_element}]")
                 return None
 
-            return float(haenam['value'].mean())
+            return haenam[['ny', 'nx', 'lat', 'lon', 'value']].reset_index(drop=True)
 
         except KeyboardInterrupt:
             raise
         except Exception as e:
             print(f"  오류 [{tm_str}|{obs_element}] (시도 {attempt}/{retries}): {e}")
-            time.sleep(2 * attempt)
+            time.sleep(10 * attempt)
 
         finally:
             if os.path.exists(temp_nc):
@@ -132,21 +136,24 @@ def fetch_haenam_mean(tm_str, obs_element, auth_key, retries=3):
 if __name__ == "__main__":
     dates = pd.date_range(start="2020-05-02", end="2025-12-31", freq="D")
 
-    # 이미 처리된 날짜 확인 (중단 후 재시작 지원)
+    # 이미 처리된 날짜 확인 (date 컬럼만 읽어 메모리 절약)
     done_dates = set()
     if os.path.exists(OUTPUT_FILE):
-        existing = pd.read_csv(OUTPUT_FILE, dtype=str)
-        done_dates = set(existing['date'].tolist())
+        existing = pd.read_csv(OUTPUT_FILE, dtype=str, usecols=['date'])
+        done_dates = set(existing['date'].dropna().unique().tolist())
         print(f"기존 파일 발견: {len(done_dates)}일 이미 처리됨\n")
     else:
-        pd.DataFrame(columns=['date', 'ta', 'rn_day']).to_csv(
+        pd.DataFrame(columns=['date', 'ny', 'nx', 'lat', 'lon', 'ta', 'rn_day']).to_csv(
             OUTPUT_FILE, index=False, encoding='utf-8-sig'
         )
 
-    # 위경도 맵 미리 로드
     get_latlon_map(AUTH_KEY)
 
     total = len(dates)
+    consecutive_failures = 0
+    FAILURE_PAUSE_THRESHOLD = 5
+    FAILURE_PAUSE_SECONDS = 300
+
     try:
         for i, date in enumerate(dates, 1):
             date_str = date.strftime("%Y%m%d")
@@ -156,31 +163,69 @@ if __name__ == "__main__":
 
             print(f"[{i}/{total}] {date_str} 처리 중...", end=" ", flush=True)
 
-            # ta: 4시간 간격 6회 수집 후 평균
-            ta_values = []
+            # ta: 시간대별 격자 데이터 수집 후 격자(ny,nx)별 평균
+            ta_frames = []
             for hour in TA_HOURS:
-                val = fetch_haenam_mean(date_str + hour, 'ta', AUTH_KEY)
-                if val is not None:
-                    ta_values.append(val)
-                time.sleep(0.5)
+                df_hour = fetch_haenam_grid_data(date_str + hour, 'ta', AUTH_KEY)
+                if df_hour is not None:
+                    ta_frames.append(df_hour)
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= FAILURE_PAUSE_THRESHOLD:
+                        print(f"\n  연속 {consecutive_failures}회 실패. {FAILURE_PAUSE_SECONDS}초 대기...")
+                        time.sleep(FAILURE_PAUSE_SECONDS)
+                        consecutive_failures = 0
+                time.sleep(2)
 
-            ta_mean = round(float(np.mean(ta_values)), 4) if ta_values else None
+            if ta_frames:
+                ta_all = pd.concat(ta_frames, ignore_index=True)
+                ta_grid = (
+                    ta_all.groupby(['ny', 'nx', 'lat', 'lon'], as_index=False)['value']
+                    .mean()
+                    .rename(columns={'value': 'ta'})
+                )
+                ta_grid['ta'] = ta_grid['ta'].round(4)
+            else:
+                ta_grid = None
 
-            # rn_day: 00시 일일 강수량 1회
-            rn_mean = fetch_haenam_mean(date_str + "0000", 'rn_day', AUTH_KEY)
-            rn_mean = round(rn_mean, 4) if rn_mean is not None else None
-            time.sleep(0.5)
+            # rn_day: 격자별 단일 값
+            rn_df = fetch_haenam_grid_data(date_str + "0000", 'rn_day', AUTH_KEY)
+            if rn_df is not None:
+                rn_grid = rn_df.rename(columns={'value': 'rn_day'})
+                rn_grid['rn_day'] = rn_grid['rn_day'].round(4)
+                consecutive_failures = 0
+            else:
+                rn_grid = None
+                consecutive_failures += 1
+            time.sleep(2)
 
-            row = pd.DataFrame([{
-                'date': date_str,
-                'ta': ta_mean if ta_mean is not None else '',
-                'rn_day': rn_mean if rn_mean is not None else '',
-            }])
-            row.to_csv(OUTPUT_FILE, index=False, mode='a', header=False, encoding='utf-8-sig')
+            # ta와 rn_day 격자 병합
+            if ta_grid is not None and rn_grid is not None:
+                day_df = pd.merge(
+                    ta_grid,
+                    rn_grid[['ny', 'nx', 'rn_day']],
+                    on=['ny', 'nx'], how='outer'
+                )
+            elif ta_grid is not None:
+                day_df = ta_grid.copy()
+                day_df['rn_day'] = ''
+            elif rn_grid is not None:
+                day_df = rn_grid.copy()
+                day_df['ta'] = ''
+            else:
+                # 둘 다 실패 → 기록하지 않고 다음 실행 때 재시도
+                print("ta=N/A, rn_day=N/A (재시도 예정)")
+                continue
 
-            ta_str = f"{ta_mean:.2f}°C ({len(ta_values)}/6)" if ta_mean is not None else "N/A"
-            rn_str = f"{rn_mean}mm" if rn_mean is not None else "N/A"
-            print(f"ta={ta_str}, rn_day={rn_str}")
+            day_df.insert(0, 'date', date_str)
+            day_df = day_df[['date', 'ny', 'nx', 'lat', 'lon', 'ta', 'rn_day']]
+            day_df.to_csv(OUTPUT_FILE, index=False, mode='a', header=False, encoding='utf-8-sig')
+
+            n_grids = len(day_df)
+            ta_str = f"OK ({len(ta_frames)}/6시간)" if ta_grid is not None else "N/A"
+            rn_str = "OK" if rn_grid is not None else "N/A"
+            print(f"{n_grids}개 격자, ta={ta_str}, rn_day={rn_str}")
 
     except KeyboardInterrupt:
         print("\n\n중단됨. 다시 실행하면 마지막 저장 지점부터 이어서 처리합니다.")
