@@ -2,6 +2,10 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib
+
+matplotlib.rcParams['font.family'] = 'Malgun Gothic'
+matplotlib.rcParams['axes.unicode_minus'] = False
 
 DATA_PATH = "../data/haenam_weather_historical.csv"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "plots")
