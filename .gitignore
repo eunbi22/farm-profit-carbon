@@ -6,3 +6,6 @@ venv
 /data
 *.png
 *.nc
+*.pyc
+*.pkl
+venv_wsl
