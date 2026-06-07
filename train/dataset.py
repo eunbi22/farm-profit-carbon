@@ -41,18 +41,29 @@ def split_train_test(df: pd.DataFrame):
 
 
 def get_cv_splits(train_df: pd.DataFrame):
-    """연도 기준 TimeSeriesSplit → (train_bool_mask, val_bool_mask) 리스트."""
+    """연도 기준 TimeSeriesSplit. 연도가 부족하면 행 단위 랜덤 분할로 fallback."""
     years = sorted(train_df["year"].unique())
-    tscv  = TimeSeriesSplit(n_splits=CV_FOLDS)
-    splits = []
-    for tr_idx, val_idx in tscv.split(years):
-        tr_years  = {years[i] for i in tr_idx}
-        val_years = {years[i] for i in val_idx}
-        splits.append((
-            train_df["year"].isin(tr_years),
-            train_df["year"].isin(val_years),
-        ))
-    return splits
+    if len(years) >= CV_FOLDS + 1:
+        tscv = TimeSeriesSplit(n_splits=CV_FOLDS)
+        splits = []
+        for tr_idx, val_idx in tscv.split(years):
+            tr_years  = {years[i] for i in tr_idx}
+            val_years = {years[i] for i in val_idx}
+            splits.append((
+                train_df["year"].isin(tr_years),
+                train_df["year"].isin(val_years),
+            ))
+        return splits
+
+    # fallback: 행 단위 80/20 분할
+    n = len(train_df)
+    idx = np.random.default_rng(42).permutation(n)
+    cut = int(n * 0.8)
+    tr_mask  = pd.Series(False, index=train_df.index)
+    val_mask = pd.Series(False, index=train_df.index)
+    tr_mask.iloc[idx[:cut]]   = True
+    val_mask.iloc[idx[cut:]]  = True
+    return [(tr_mask, val_mask)]
 
 
 def fit_scalers(train_df: pd.DataFrame):

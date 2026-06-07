@@ -19,7 +19,7 @@ def load_county_production() -> pd.DataFrame:
     2행 헤더의 wide-format CSV를 파싱 →
     columns: year, area_ha, yield_10a_kg, total_ton
     """
-    raw = pd.read_csv(PRODUCTION_CSV, header=None, encoding="utf-8-sig")
+    raw = pd.read_csv(PRODUCTION_CSV, header=None, encoding="cp949")
     year_row = raw.iloc[0].tolist()
     data_row = raw.iloc[2].tolist()   # 해남군 행
 
@@ -52,7 +52,7 @@ def fit_county_model(county_df: pd.DataFrame,
     weather_county: year, ta_season_mean, rn_season_sum (필지 평균 → 군 대표값)
     """
     merged = county_df.merge(weather_county, on="year", how="inner")
-    if len(merged) < 3:
+    if len(merged) < 2:
         raise ValueError(f"회귀에 필요한 샘플 부족: {len(merged)}개")
 
     X = merged[["ta_season_mean", "rn_season_sum"]].values

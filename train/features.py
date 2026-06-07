@@ -27,7 +27,7 @@ def load_farmmap_centroids() -> pd.DataFrame:
     gdf["uid"] = gdf["uid"].astype(str)
 
     meta = pd.read_csv(
-        FARMMAP_CSV, encoding="utf-8-sig",
+        FARMMAP_CSV, encoding="cp949",
         usecols=["uid", "area_m2", "cad_con_ra"],
         dtype={"uid": str},
     ).dropna(subset=["area_m2", "cad_con_ra"])

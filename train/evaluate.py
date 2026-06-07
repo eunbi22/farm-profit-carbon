@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import json, pickle
 import numpy as np
 import pandas as pd
-import torch
+import tensorflow as tf
+from tensorflow import keras
 import xgboost as xgb
 import shap
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -22,11 +23,10 @@ from dataset import (
     prepare_tabular, prepare_lstm_sequences, prepare_county_series,
     ALL_FEATURES, TARGET,
 )
-from train_lstm import YieldLSTM
+from train_lstm import build_model
 from disaggregate import compute_parcel_weights
 
 SAVE_DIR = os.path.join(RESULT_DIR, "models")
-DEVICE   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ─── 유틸 ────────────────────────────────────────────────────────────────────
@@ -54,23 +54,10 @@ def predict_xgboost(test_df, scaler_X, scaler_y):
 
 
 def predict_lstm(test_df, scaler_X, scaler_y):
-    with open(os.path.join(RESULT_DIR, "metrics", "lstm_best_params.json")) as f:
-        best_p = json.load(f)
-    model = YieldLSTM(
-        hidden_size=best_p["hidden_size"],
-        num_layers=best_p["num_layers"],
-        dropout=best_p["dropout"],
-    ).to(DEVICE)
-    model.load_state_dict(torch.load(os.path.join(SAVE_DIR, "lstm.pt"),
-                                     map_location=DEVICE))
-    model.eval()
+    model = keras.models.load_model(os.path.join(SAVE_DIR, "lstm.keras"))
 
     seq, static, y_s = prepare_lstm_sequences(test_df, scaler_X, scaler_y)
-    with torch.no_grad():
-        pred_s = model(
-            torch.tensor(seq,    dtype=torch.float32).to(DEVICE),
-            torch.tensor(static, dtype=torch.float32).to(DEVICE),
-        ).cpu().numpy()
+    pred_s = model.predict([seq, static], verbose=0).ravel()
     return _inverse_y(pred_s, scaler_y), _inverse_y(y_s, scaler_y), model
 
 
@@ -145,34 +132,23 @@ def run_shap_lstm(model, test_df, scaler_X):
     np.random.seed(RANDOM_SEED)
     idx = np.random.choice(len(seq), bg_size, replace=False)
 
-    class LSTMWrapper(torch.nn.Module):
-        """SHAP GradientExplainer용: 입력을 하나의 텐서로 flatten."""
-        def __init__(self, base, n_seq_flat):
-            super().__init__()
-            self.base = base
-            self.n_seq_flat = n_seq_flat
+    bg_seq    = seq[idx].astype(np.float32)
+    bg_static = static[idx].astype(np.float32)
 
-        def forward(self, x):
-            seq_   = x[:, :self.n_seq_flat].reshape(-1, 5, 2)
-            static_ = x[:, self.n_seq_flat:]
-            return self.base(seq_, static_)
-
-    n_seq_flat = seq.shape[1] * seq.shape[2]
-    X_flat = np.concatenate([seq.reshape(len(seq), -1), static], axis=1)
-    bg_flat = torch.tensor(X_flat[idx], dtype=torch.float32).to(DEVICE)
-
-    wrapper = LSTMWrapper(model, n_seq_flat).to(DEVICE)
-    explainer = shap.GradientExplainer(wrapper, bg_flat)
-    sv_flat = explainer.shap_values(
-        torch.tensor(X_flat, dtype=torch.float32).to(DEVICE)
+    explainer = shap.GradientExplainer(model, [bg_seq, bg_static])
+    sv = explainer.shap_values(
+        [seq.astype(np.float32), static.astype(np.float32)]
     )
-    # 앞 n_seq_flat 컬럼은 시퀀스 feature, 뒤 4는 static
+    # sv[0]: (N, 5, 2) seq shap, sv[1]: (N, 4) static shap
+    n_seq_flat = seq.shape[1] * seq.shape[2]
     seq_cols  = [f"seq_{i}" for i in range(n_seq_flat)]
     stat_cols = ["area_m2", "cad_con_ra", "lat", "lon"]
-    df = pd.DataFrame(sv_flat, columns=seq_cols + stat_cols)
+    sv_seq_flat = sv[0].reshape(len(seq), -1)
+    df = pd.DataFrame(np.concatenate([sv_seq_flat, sv[1]], axis=1),
+                      columns=seq_cols + stat_cols)
     df.to_csv(os.path.join(RESULT_DIR, "shap_lstm.csv"), index=False)
     print("LSTM SHAP 저장 완료.")
-    return sv_flat
+    return sv
 
 
 # ─── 메인 ────────────────────────────────────────────────────────────────────

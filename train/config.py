@@ -14,10 +14,10 @@ TA_SCALE         = 0.1                # KMA raw ta 단위: 0.1°C
 RN_SCALE         = 1.0                # rn_day 단위: mm
 
 DATA_START_DATE  = "2020-05-02"
-TRAIN_YEARS_END  = 2024   # 학습 마지막 연도 (포함)
-TEST_YEARS_START = 2025   # 테스트 첫 연도
+TRAIN_YEARS_END  = 2023   # 학습 마지막 연도 (포함)
+TEST_YEARS_START = 2024   # 테스트 첫 연도
 
-CV_FOLDS      = 3
+CV_FOLDS      = 2
 OPTUNA_TRIALS = 50
 RANDOM_SEED   = 42
 

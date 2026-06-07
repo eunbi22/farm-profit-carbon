@@ -1,5 +1,5 @@
 """
-PyTorch LSTM 필지별 생산량 예측 (Optuna + Adam).
+TensorFlow/Keras LSTM 필지별 생산량 예측 (Optuna + Adam).
 
 입력:
   seq_input    (N, 5, 2)  – 영농기 월별 [avg_ta, sum_rn]
@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import json
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 import optuna
 
 from config import RESULT_DIR, OPTUNA_TRIALS, RANDOM_SEED, CV_FOLDS
@@ -26,75 +26,42 @@ from dataset import (
 )
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-SAVE_DIR  = os.path.join(RESULT_DIR, "models")
-DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SAVE_DIR = os.path.join(RESULT_DIR, "models")
 
 
-class YieldLSTM(nn.Module):
-    def __init__(self, hidden_size: int, num_layers: int, dropout: float,
-                 static_dim: int = 4, seq_features: int = 2):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=seq_features,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.head = nn.Sequential(
-            nn.Linear(hidden_size + static_dim, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, 1),
-        )
+def build_model(hidden_size: int, num_layers: int, dropout: float) -> keras.Model:
+    seq_input    = keras.Input(shape=(5, 2),  name="seq_input")
+    static_input = keras.Input(shape=(4,),    name="static_input")
 
-    def forward(self, seq, static):
-        _, (h_n, _) = self.lstm(seq)
-        h_last = h_n[-1]                        # (batch, hidden_size)
-        x = torch.cat([h_last, static], dim=1)  # (batch, hidden + static_dim)
-        return self.head(x).squeeze(1)
+    x = seq_input
+    for i in range(num_layers):
+        return_sequences = (i < num_layers - 1)
+        x = layers.LSTM(hidden_size, return_sequences=return_sequences,
+                        dropout=dropout)(x)
 
+    x = layers.Concatenate()([x, static_input])
+    x = layers.Dense(hidden_size, activation="relu")(x)
+    x = layers.Dropout(dropout)(x)
+    output = layers.Dense(1)(x)
 
-def _make_tensors(seq, static, y):
-    return (
-        torch.tensor(seq,    dtype=torch.float32),
-        torch.tensor(static, dtype=torch.float32),
-        torch.tensor(y,      dtype=torch.float32),
-    )
+    return keras.Model(inputs=[seq_input, static_input], outputs=output)
 
 
 def _train_one_fold(params: dict, seq_tr, stat_tr, y_tr,
                     seq_val, stat_val, y_val, n_epochs=50):
-    model = YieldLSTM(
-        hidden_size=params["hidden_size"],
-        num_layers=params["num_layers"],
-        dropout=params["dropout"],
-    ).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=params["lr"])
-    loss_fn = nn.MSELoss()
-
-    ds = TensorDataset(*_make_tensors(seq_tr, stat_tr, y_tr))
-    dl = DataLoader(ds, batch_size=params["batch_size"], shuffle=True)
-
-    best_val = float("inf")
-    for _ in range(n_epochs):
-        model.train()
-        for s, st, yb in dl:
-            s, st, yb = s.to(DEVICE), st.to(DEVICE), yb.to(DEVICE)
-            opt.zero_grad()
-            loss_fn(model(s, st), yb).backward()
-            opt.step()
-
-        model.eval()
-        with torch.no_grad():
-            sv  = torch.tensor(seq_val,  dtype=torch.float32).to(DEVICE)
-            stv = torch.tensor(stat_val, dtype=torch.float32).to(DEVICE)
-            yv  = torch.tensor(y_val,    dtype=torch.float32).to(DEVICE)
-            val_loss = loss_fn(model(sv, stv), yv).item()
-        if val_loss < best_val:
-            best_val = val_loss
-
-    return best_val
+    tf.random.set_seed(RANDOM_SEED)
+    model = build_model(params["hidden_size"], params["num_layers"], params["dropout"])
+    model.compile(optimizer=keras.optimizers.Adam(learning_rate=params["lr"]),
+                  loss="mse")
+    model.fit(
+        [seq_tr, stat_tr], y_tr,
+        validation_data=([seq_val, stat_val], y_val),
+        epochs=n_epochs,
+        batch_size=params["batch_size"],
+        verbose=0,
+    )
+    val_loss = model.evaluate([seq_val, stat_val], y_val, verbose=0)
+    return val_loss
 
 
 def _objective(trial, train_df, scaler_X, scaler_y, cv_splits):
@@ -107,7 +74,7 @@ def _objective(trial, train_df, scaler_X, scaler_y, cv_splits):
     }
     fold_losses = []
     for tr_mask, val_mask in cv_splits:
-        seq_tr, stat_tr, y_tr  = prepare_lstm_sequences(train_df[tr_mask],  scaler_X, scaler_y)
+        seq_tr, stat_tr, y_tr   = prepare_lstm_sequences(train_df[tr_mask],  scaler_X, scaler_y)
         seq_val, stat_val, y_val = prepare_lstm_sequences(train_df[val_mask], scaler_X, scaler_y)
         fold_losses.append(
             _train_one_fold(params, seq_tr, stat_tr, y_tr, seq_val, stat_val, y_val)
@@ -116,8 +83,8 @@ def _objective(trial, train_df, scaler_X, scaler_y, cv_splits):
 
 
 def train_lstm(parcel_df):
-    torch.manual_seed(RANDOM_SEED)
-    df       = load_dataset(parcel_df)
+    tf.random.set_seed(RANDOM_SEED)
+    df = load_dataset(parcel_df)
     train_df, test_df = split_train_test(df)
     scaler_X, scaler_y = fit_scalers(train_df)
     cv_splits = get_cv_splits(train_df)
@@ -136,39 +103,28 @@ def train_lstm(parcel_df):
     print(f"\n최적 LSTM 파라미터: {best_p}")
     print(f"최적 CV Loss (scaled MSE): {study.best_value:.4f}")
 
-    # 전체 train으로 최종 학습 (loss 기록 포함)
     seq_tr, stat_tr, y_tr = prepare_lstm_sequences(train_df, scaler_X, scaler_y)
-    final = YieldLSTM(
-        hidden_size=best_p["hidden_size"],
-        num_layers=best_p["num_layers"],
-        dropout=best_p["dropout"],
-    ).to(DEVICE)
-    opt    = torch.optim.Adam(final.parameters(), lr=best_p["lr"])
-    loss_fn = nn.MSELoss()
-    ds = TensorDataset(*_make_tensors(seq_tr, stat_tr, y_tr))
-    dl = DataLoader(ds, batch_size=best_p["batch_size"], shuffle=True)
+    final = build_model(best_p["hidden_size"], best_p["num_layers"], best_p["dropout"])
+    final.compile(optimizer=keras.optimizers.Adam(learning_rate=best_p["lr"]), loss="mse")
 
-    train_losses = []
-    for epoch in range(100):
-        final.train()
-        epoch_loss = 0.0
-        for s, st, yb in dl:
-            s, st, yb = s.to(DEVICE), st.to(DEVICE), yb.to(DEVICE)
-            opt.zero_grad()
-            l = loss_fn(final(s, st), yb)
-            l.backward()
-            opt.step()
-            epoch_loss += l.item()
-        train_losses.append(epoch_loss / len(dl))
-        if (epoch + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1:3d}/100  loss={train_losses[-1]:.4f}")
+    history = final.fit(
+        [seq_tr, stat_tr], y_tr,
+        epochs=100,
+        batch_size=best_p["batch_size"],
+        verbose=0,
+        callbacks=[keras.callbacks.LambdaCallback(
+            on_epoch_end=lambda epoch, logs:
+                print(f"  Epoch {epoch+1:3d}/100  loss={logs['loss']:.4f}")
+                if (epoch + 1) % 10 == 0 else None
+        )],
+    )
 
-    torch.save(final.state_dict(), os.path.join(SAVE_DIR, "lstm.pt"))
+    final.save(os.path.join(SAVE_DIR, "lstm.keras"))
     with open(os.path.join(RESULT_DIR, "metrics", "lstm_best_params.json"), "w") as f:
         json.dump(best_p, f, indent=2)
     with open(os.path.join(RESULT_DIR, "loss_history_lstm.json"), "w") as f:
         json.dump({
-            "train_loss": train_losses,
+            "train_loss":   history.history["loss"],
             "optuna_trials": [t.value for t in study.trials],
         }, f)
 
@@ -177,16 +133,12 @@ def train_lstm(parcel_df):
 
 
 if __name__ == "__main__":
+    import numpy as np
     from features import build_parcel_features
-    from disaggregate import (
-        load_county_production, fit_county_model,
-        compute_parcel_weights, disaggregate_yield,
-    )
 
-    pf        = build_parcel_features()
-    county_df = load_county_production()
-    cw        = pf.groupby("year")[["ta_season_mean", "rn_season_sum"]].mean().reset_index()
-    reg       = fit_county_model(county_df, cw)
-    pf_w      = compute_parcel_weights(pf, reg["a"], reg["b"], reg["c"])
-    parcel_df = disaggregate_yield(pf_w, county_df)
-    train_lstm(parcel_df)
+    pf = build_parcel_features()
+    # 임시 yield: 나중에 실제 생산량 데이터로 교체
+    pf["yield_per_10a"] = (
+        pf["ta_season_mean"] * 5.0 + pf["rn_season_sum"] * 0.05 + 400
+    ).clip(lower=100)
+    train_lstm(pf)
