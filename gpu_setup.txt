@@ -1,0 +1,21 @@
+==== WSL GPU 환경 설정 ====
+
+1. 가상환경 활성화
+source venv_wsl/bin/activate
+
+2. LD_LIBRARY_PATH 설정
+export LD_LIBRARY_PATH=$(python3 -c "import os, site; sp = site.getsitepackages()[0]; libs = ['nvidia/cuda_runtime/lib','nvidia/cuda_cupti/lib','nvidia/cublas/lib','nvidia/cudnn/lib','nvidia/curand/lib','nvidia/cusolver/lib','nvidia/cusparse/lib','nvidia/nccl/lib','nvidia/nvjitlink/lib']; print(':'.join(os.path.join(sp, l) for l in libs))"):/usr/lib/wsl/lib:$LD_LIBRARY_PATH
+
+3. GPU 인식 확인
+python3 -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
+
+==== 학습 실행 ====
+
+cd /mnt/c/Desktop/farm-profit-carbon/train
+
+python train_xgboost.py
+python train_lstm.py
+python train_sarimax.py
+python train_prophet.py
+
+python evaluate.py
