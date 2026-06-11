@@ -134,7 +134,7 @@ def fetch_haenam_grid_data(tm_str, obs_element, auth_key, retries=3):
 
 
 if __name__ == "__main__":
-    dates = pd.date_range(start="2020-05-02", end="2025-12-31", freq="D")
+    dates = pd.date_range(start="2023-01-01", end="2025-12-31", freq="D")
 
     # 이미 처리된 날짜 확인 (date 컬럼만 읽어 메모리 절약)
     done_dates = set()
