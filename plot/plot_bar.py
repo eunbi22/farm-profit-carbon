@@ -9,6 +9,7 @@
 """
 
 import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "train"))
 
 import numpy as np
@@ -18,7 +19,9 @@ import matplotlib.patches as mpatches
 
 from config import RESULT_DIR
 
-plt.rcParams.update({"font.family": "sans-serif", "font.size": 11, "figure.dpi": 150})
+from _font import setup as _setup_font
+_setup_font()
+plt.rcParams.update({"font.size": 11, "figure.dpi": 150})
 
 MODEL_COLORS = {
     "XGBoost": "#DD8452",

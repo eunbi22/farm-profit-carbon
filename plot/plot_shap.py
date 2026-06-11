@@ -8,6 +8,7 @@ SHAP 분석 시각화.
 """
 
 import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "train"))
 
 import numpy as np
@@ -18,6 +19,8 @@ import shap
 from config import RESULT_DIR
 from dataset import ALL_FEATURES, GROWING_MONTHS
 
+from _font import setup as _setup_font
+_setup_font()
 plt.rcParams.update({"font.size": 10, "figure.dpi": 150})
 
 FEATURE_KOR = {

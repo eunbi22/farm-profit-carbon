@@ -8,6 +8,7 @@
 """
 
 import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "train"))
 
 import numpy as np
@@ -20,6 +21,8 @@ from matplotlib.colors import Normalize
 
 from config import RESULT_DIR, FARMMAP_GEO
 
+from _font import setup as _setup_font
+_setup_font()
 plt.rcParams.update({"font.size": 10, "figure.dpi": 150})
 
 MODEL_LABELS = {
@@ -33,7 +36,7 @@ MODEL_LABELS = {
 def load_geodata():
     print("geojson 로딩 (heatmap용)…")
     gdf = gpd.read_file(FARMMAP_GEO)
-    gdf["uid"] = gdf["uid"].astype(str)
+    gdf["uid"] = gdf["uid"].astype(str).str.strip()
     return gdf
 
 
@@ -41,7 +44,9 @@ def load_predictions():
     path = os.path.join(RESULT_DIR, "predictions_test.csv")
     if not os.path.exists(path):
         raise FileNotFoundError(f"예측 결과 없음: {path}")
-    return pd.read_csv(path, encoding="utf-8-sig", dtype={"uid": str})
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    df["uid"] = df["uid"].astype(str).str.strip()
+    return df
 
 
 def _single_heatmap(gdf_merged, col, title, ax, vmin, vmax, cmap="YlOrRd"):
@@ -61,6 +66,11 @@ def _single_heatmap(gdf_merged, col, title, ax, vmin, vmax, cmap="YlOrRd"):
 def plot_all_heatmaps(gdf, pred_df):
     models = [c.replace("pred_", "") for c in pred_df.columns if c.startswith("pred_")]
     years  = sorted(pred_df["year"].unique())
+
+    gdf = gdf.copy()
+    gdf["uid"] = gdf["uid"].astype(str)
+    pred_df = pred_df.copy()
+    pred_df["uid"] = pred_df["uid"].astype(str)
 
     for year in years:
         yr_df = pred_df[pred_df["year"] == year]
@@ -104,6 +114,10 @@ def plot_error_heatmap(gdf, pred_df, model="xgboost"):
     col = f"pred_{model}"
     if col not in pred_df.columns:
         return
+    gdf = gdf.copy()
+    gdf["uid"] = gdf["uid"].astype(str)
+    pred_df = pred_df.copy()
+    pred_df["uid"] = pred_df["uid"].astype(str)
     years = sorted(pred_df["year"].unique())
     for year in years:
         yr_df = pred_df[pred_df["year"] == year].copy()

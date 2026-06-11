@@ -8,6 +8,7 @@
 """
 
 import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "train"))
 
 import numpy as np
@@ -17,6 +18,8 @@ import matplotlib.lines as mlines
 
 from config import RESULT_DIR
 
+from _font import setup as _setup_font
+_setup_font()
 plt.rcParams.update({"font.size": 11, "figure.dpi": 150})
 
 MODEL_COLORS = {
@@ -56,6 +59,12 @@ def plot_county_trend(pred_df: pd.DataFrame):
                     linestyle="--", linewidth=1.6, marker="s",
                     markersize=5, label=MODEL_LABELS.get(m, m))
 
+    years = agg["year"].tolist()
+    ax.set_xticks(years)
+    ax.set_xticklabels([str(y) for y in years])
+    if len(years) == 1:
+        margin = 0.5
+        ax.set_xlim(years[0] - margin, years[0] + margin)
     ax.set_title("군 평균 10a당 생산량 – 실측 vs 예측 (테스트셋)")
     ax.set_xlabel("연도")
     ax.set_ylabel("10a당 생산량 (kg)")

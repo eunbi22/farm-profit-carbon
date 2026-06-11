@@ -8,6 +8,7 @@
 """
 
 import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "train"))
 
 import json
@@ -16,7 +17,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
 from config import RESULT_DIR
+from _font import setup as _setup_font
 
+_setup_font()
 plt.rcParams.update({"font.size": 11, "figure.dpi": 150})
 COLORS = {"lstm": "#4C72B0", "xgboost": "#DD8452",
           "sarimax": "#55A868", "prophet": "#C44E52"}
