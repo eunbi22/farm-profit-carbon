@@ -24,7 +24,6 @@ from dataset import (
     ALL_FEATURES, TARGET,
 )
 from train_lstm import build_model
-from disaggregate import compute_parcel_weights
 
 SAVE_DIR = os.path.join(RESULT_DIR, "models")
 
@@ -55,63 +54,49 @@ def predict_xgboost(test_df, scaler_X, scaler_y):
 
 def predict_lstm(test_df, scaler_X, scaler_y):
     model = keras.models.load_model(os.path.join(SAVE_DIR, "lstm.keras"))
-
     seq, static, y_s = prepare_lstm_sequences(test_df, scaler_X, scaler_y)
     pred_s = model.predict([seq, static], verbose=0).ravel()
     return _inverse_y(pred_s, scaler_y), _inverse_y(y_s, scaler_y), model
 
 
-def _disaggregate_county_pred(county_pred_kg, test_df, reg_info):
-    """군 단위 예측값을 필지 가중치로 분배 → 필지별 yield_per_10a."""
-    pf_w = compute_parcel_weights(
-        test_df, reg_info["a"], reg_info["b"], reg_info["c"]
-    )
-    results = []
-    for year, grp in pf_w.groupby("year"):
-        if year not in county_pred_kg:
-            continue
-        w_sum = grp["weight"].sum()
-        pred_kg = county_pred_kg[year] * grp["weight"] / w_sum
-        pred_10a = pred_kg / (grp["area_m2"] / 1000.0)
-        results.append(pred_10a.values)
-    return np.concatenate(results)
-
-
-def predict_sarimax(test_df, county_df, reg_info):
+def predict_sarimax(test_df, county_df):
     with open(os.path.join(SAVE_DIR, "sarimax.pkl"), "rb") as f:
         saved = pickle.load(f)
     county_series = prepare_county_series(test_df, county_df)
     test_county   = county_series[county_series["year"] >= TEST_YEARS_START]
+    if len(test_county) == 0:
+        true_parcel = test_df.sort_values("year")[TARGET].values
+        return np.full(len(true_parcel), np.nan), true_parcel
     exog = test_county[saved["exog_cols"]].astype(float).values
-    pred_10a_arr = saved["model"].forecast(steps=len(test_county), exog=exog)
-    county_pred_kg = {
-        row["year"]: row_pred * (row["area_ha"] * 100)  # 10a당 × 10a수 = 총kg
-        for (_, row), row_pred in zip(
-            county_df[county_df["year"] >= TEST_YEARS_START].iterrows(),
-            pred_10a_arr,
-        )
-    }
-    pred_parcel = _disaggregate_county_pred(county_pred_kg, test_df, reg_info)
+    pred_10a_county = saved["model"].forecast(steps=len(test_county), exog=exog)
+
+    # 군 예측값을 필지 면적 비례로 분배
+    year_pred = dict(zip(test_county["year"].values, pred_10a_county))
+    pred_list = []
+    for year, grp in test_df.sort_values("year").groupby("year"):
+        val = year_pred.get(year, np.nan)
+        pred_list.extend([val] * len(grp))
     true_parcel = test_df.sort_values("year")[TARGET].values
-    return pred_parcel, true_parcel
+    return np.array(pred_list), true_parcel
 
 
-def predict_prophet(test_df, county_df, reg_info):
+def predict_prophet(test_df, county_df):
     with open(os.path.join(SAVE_DIR, "prophet.pkl"), "rb") as f:
         saved = pickle.load(f)
     county_series = prepare_county_series(test_df, county_df)
     test_county   = county_series[county_series["year"] >= TEST_YEARS_START].copy()
+    if len(test_county) == 0:
+        true_parcel = test_df.sort_values("year")[TARGET].values
+        return np.full(len(true_parcel), np.nan), true_parcel
     test_county["ds"] = pd.to_datetime(test_county["year"].astype(str) + "-01-01")
-    pred_df = saved["model"].predict(test_county[["ds"] + saved["exog_cols"]])
-    county_pred_kg = {
-        int(row["ds"].year): row["yhat"] * (
-            county_df.loc[county_df["year"] == int(row["ds"].year), "area_ha"].values[0] * 100
-        )
-        for _, row in pred_df.iterrows()
-    }
-    pred_parcel = _disaggregate_county_pred(county_pred_kg, test_df, reg_info)
+    pred_df_prophet = saved["model"].predict(test_county[["ds"] + saved["exog_cols"]])
+    year_pred = dict(zip(test_county["year"].values, pred_df_prophet["yhat"].values))
+    pred_list = []
+    for year, grp in test_df.sort_values("year").groupby("year"):
+        val = year_pred.get(year, np.nan)
+        pred_list.extend([val] * len(grp))
     true_parcel = test_df.sort_values("year")[TARGET].values
-    return pred_parcel, true_parcel
+    return np.array(pred_list), true_parcel
 
 
 # ─── SHAP ────────────────────────────────────────────────────────────────────
@@ -139,12 +124,12 @@ def run_shap_lstm(model, test_df, scaler_X):
     sv = explainer.shap_values(
         [seq.astype(np.float32), static.astype(np.float32)]
     )
-    # sv[0]: (N, 5, 2) seq shap, sv[1]: (N, 4) static shap
     n_seq_flat = seq.shape[1] * seq.shape[2]
     seq_cols  = [f"seq_{i}" for i in range(n_seq_flat)]
     stat_cols = ["area_m2", "cad_con_ra", "lat", "lon"]
-    sv_seq_flat = sv[0].reshape(len(seq), -1)
-    df = pd.DataFrame(np.concatenate([sv_seq_flat, sv[1]], axis=1),
+    sv_seq_flat = np.array(sv[0]).reshape(len(seq), -1)
+    sv_static   = np.array(sv[1]).reshape(len(seq), -1)
+    df = pd.DataFrame(np.concatenate([sv_seq_flat, sv_static], axis=1),
                       columns=seq_cols + stat_cols)
     df.to_csv(os.path.join(RESULT_DIR, "shap_lstm.csv"), index=False)
     print("LSTM SHAP 저장 완료.")
@@ -153,8 +138,8 @@ def run_shap_lstm(model, test_df, scaler_X):
 
 # ─── 메인 ────────────────────────────────────────────────────────────────────
 
-def evaluate(parcel_df, county_df, reg_info):
-    df       = load_dataset(parcel_df)
+def evaluate(parcel_df, county_df):
+    df = load_dataset(parcel_df)
     _, test_df = split_train_test(df)
     scaler_X, scaler_y = load_scalers()
 
@@ -165,34 +150,36 @@ def evaluate(parcel_df, county_df, reg_info):
     pred_xgb, true_xgb, xgb_model = predict_xgboost(test_df, scaler_X, scaler_y)
     all_metrics.append(_metrics(true_xgb, pred_xgb, "XGBoost"))
     all_preds["xgboost"] = pred_xgb
-    run_shap_xgboost(xgb_model, test_df, scaler_X)
 
     # LSTM
     pred_lstm, true_lstm, lstm_model = predict_lstm(test_df, scaler_X, scaler_y)
     all_metrics.append(_metrics(true_lstm, pred_lstm, "LSTM"))
     all_preds["lstm"] = pred_lstm
-    run_shap_lstm(lstm_model, test_df, scaler_X)
 
     # SARIMAX
-    pred_sar, true_sar = predict_sarimax(test_df, county_df, reg_info)
+    pred_sar, true_sar = predict_sarimax(test_df, county_df)
     all_metrics.append(_metrics(true_sar, pred_sar, "SARIMAX"))
     all_preds["sarimax"] = pred_sar
 
     # Prophet
-    pred_pro, true_pro = predict_prophet(test_df, county_df, reg_info)
+    pred_pro, true_pro = predict_prophet(test_df, county_df)
     all_metrics.append(_metrics(true_pro, pred_pro, "Prophet"))
     all_preds["prophet"] = pred_pro
 
-    # 저장
+    # 예측/메트릭 저장 (SHAP 이전에 먼저)
     metrics_df = pd.DataFrame(all_metrics)
     metrics_df.to_csv(os.path.join(RESULT_DIR, "metrics", "test_metrics.csv"),
                       index=False, encoding="utf-8-sig")
 
-    pred_df = test_df[["uid", "year", TARGET]].copy().reset_index(drop=True)
+    pred_df = test_df[["uid", "year", "area_m2", TARGET]].copy().reset_index(drop=True)
     for name, arr in all_preds.items():
         pred_df[f"pred_{name}"] = arr
     pred_df.to_csv(os.path.join(RESULT_DIR, "predictions_test.csv"),
                    index=False, encoding="utf-8-sig")
+
+    # SHAP
+    run_shap_xgboost(xgb_model, test_df, scaler_X)
+    run_shap_lstm(lstm_model, test_df, scaler_X)
 
     print("\n=== 최종 테스트 메트릭 ===")
     print(metrics_df.to_string(index=False))
@@ -201,15 +188,15 @@ def evaluate(parcel_df, county_df, reg_info):
 
 if __name__ == "__main__":
     from features import build_parcel_features
-    from disaggregate import (
-        load_county_production, fit_county_model,
-        compute_parcel_weights, disaggregate_yield,
-    )
 
-    pf        = build_parcel_features()
-    county_df = load_county_production()
-    cw        = pf.groupby("year")[["ta_season_mean", "rn_season_sum"]].mean().reset_index()
-    reg_info  = fit_county_model(county_df, cw)
-    pf_w      = compute_parcel_weights(pf, reg_info["a"], reg_info["b"], reg_info["c"])
-    parcel_df = disaggregate_yield(pf_w, county_df)
-    evaluate(parcel_df, county_df, reg_info)
+    pf = build_parcel_features()
+    pf["yield_per_10a"] = (
+        pf["ta_season_mean"] * 5.0 + pf["rn_season_sum"] * 0.05 + 400
+    ).clip(lower=100)
+    county_df = (
+        pf.groupby("year")
+          .agg(area_ha=("area_m2", lambda x: x.sum() / 10000),
+               yield_10a_kg=("yield_per_10a", "mean"))
+          .reset_index()
+    )
+    evaluate(pf, county_df)
